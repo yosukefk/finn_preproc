@@ -127,6 +127,10 @@ BEGIN
   n := (SELECT count(*) FROM tbl_pers_near);
   raise notice 'pers: near %', n;
 
+  IF n = 0 THEN
+    RETURN;
+  END IF;
+
   -- identify connected components
   DROP TABLE IF EXISTS tbl_pers_togrp;
   CREATE TEMPORARY TABLE tbl_pers_togrp AS
@@ -194,7 +198,10 @@ DO language plpgsql $$
 
       --IF r.idx = 4 AND r.jdx = 2 THEN -- Texas?
       --IF r.idx = 4 AND r.jdx = 0 THEN -- only 1000 points
-      IF r.x0 < -98.1 AND r.x1 > -98.1 AND r.y0 < 29.7 AND r.y1 > 29.7 THEN -- New Braunfels
+--      IF r.x0 < -98.1 AND r.x1 > -98.1 AND r.y0 < 29.7 AND r.y1 > 29.7 OR -- New Braunfels
+--        r.x0 < -99.3 AND r.x1 > -99.3 AND r.y0 < 28.3 AND r.y1 > 28.3 -- Artesia Wells
+        IF TRUE
+        THEN 
 
       -- create scratch table
       DROP TABLE IF EXISTS tbl_dupdet;
@@ -209,20 +216,8 @@ DO language plpgsql $$
       n:= (select count(*) from tbl_dupdet);
       raise notice '% % % %', r.idx, r.jdx, n, ST_AsText(r.geom);
 
+      CONTINUE WHEN n < 2;
 
---      p := find_persistence('tbl_dupdet');
---      
---      INSERT INTO tbl_persistent(grpid, fireid, ndetect)
---      SELECT x.grpid, x.fireid, x.ndetect
---      FROM unnest(p) x;
-
---       drop table if exists xxx;
---       create table xxx (x persistence);
---       WITH foo AS (
---         SELECT find_persistence('tbl_dupdet') x
---       )
---       INSERT INTO xxx
---       SELECT * from foo;
 
       WITH foo AS (
         SELECT find_persistence('tbl_dupdet') x
