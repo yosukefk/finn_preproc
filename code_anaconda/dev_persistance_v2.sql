@@ -86,6 +86,44 @@ CREATE TYPE persistence AS (
   fireid integer,
   ndetect integer
 );
+
+-- i read that i shouldnt create/drop tables inside function, makes many locks
+-- better make one outside
+-- https://stackoverflow.com/questions/16490664/error-out-of-shared-memory
+CREATE OR REPLACE FUNCTION prep_find_persistence(tbl regclass)
+RETURNS void
+AS $$
+
+BEGIN
+
+  DROP TABLE IF EXISTS tbl_pers_in;
+  EXECUTE 'CREATE TEMPORARY TABLE tbl_pers_in (
+    LIKE ' || tbl || ');';
+
+  DROP TABLE IF EXISTS tbl_pers_near;
+  CREATE TEMPORARY TABLE tbl_pers_near (
+    lhs integer,
+    rhs integer
+  );
+
+  DROP TABLE IF EXISTS tbl_pers_togrp;
+  CREATE TEMPORARY TABLE tbl_pers_togrp (
+    fireid integer,
+    lhs integer,
+    rhs integer,
+    ndetect integer
+  );
+
+  DROP TABLE IF EXISTS tbl_pers_grpcnt;
+  CREATE TEMPORARY TABLE tbl_pers_grpcnt (
+    grpid integer,
+    fireid integer,
+    ndetect integer
+  );
+
+END
+$$ LANGUAGE plpgsql;
+
 CREATE OR REPLACE FUNCTION find_persistence(tbl regclass)
 RETURNS setof persistence 
 AS $$ 
@@ -97,8 +135,8 @@ DECLARE
 BEGIN
 
   -- subset smaller fires
-  DROP TABLE IF EXISTS tbl_pers_in;
-  EXECUTE 'CREATE TEMPORARY TABLE tbl_pers_in AS (
+  EXECUTE 'TRUNCATE TABLE tbl_pers_in;';
+  EXECUTE 'INSERT INTO tbl_pers_in (
     SELECT * from ' || tbl || 
     ' WHERE area_sqkm < 2 ' || 
     ');';
@@ -106,8 +144,8 @@ BEGIN
   raise notice 'pers: in %', n;
 
   -- create near table
-  DROP TABLE IF EXISTS tbl_pers_near;
-  CREATE TEMPORARY TABLE tbl_pers_near AS ( 
+  TRUNCATE TABLE tbl_pers_near;
+  INSERT INTO tbl_pers_near ( 
     WITH foo AS ( 
       SELECT 
       a.fireid AS aid, 
@@ -123,7 +161,7 @@ BEGIN
     SELECT aid AS lhs, bid AS rhs 
     FROM foo) 
   ;
-  CREATE UNIQUE INDEX idx_pers_near ON tbl_pers_near(lhs, rhs);
+--  CREATE UNIQUE INDEX idx_pers_near ON tbl_pers_near(lhs, rhs);
   n := (SELECT count(*) FROM tbl_pers_near);
   raise notice 'pers: near %', n;
 
@@ -132,33 +170,35 @@ BEGIN
   END IF;
 
   -- identify connected components
-  DROP TABLE IF EXISTS tbl_pers_togrp;
-  CREATE TEMPORARY TABLE tbl_pers_togrp AS
-  WITH foo AS
-  (
-    SELECT array_agg(lhs) lhs, array_agg(rhs) rhs
-    FROM tbl_pers_near
-  ),
-  bar AS
-  (
-    SELECT pnt2grp(lhs, rhs) pnt2grp
-    FROM foo
-  )
-  SELECT (pnt2grp).fireid,  (pnt2grp).lhs, (pnt2grp).rhs, (pnt2grp).ndetect
-  FROM bar;
+  TRUNCATE TABLE tbl_pers_togrp;
+  INSERT INTO tbl_pers_togrp ( 
+    WITH foo AS
+    (
+      SELECT array_agg(lhs) lhs, array_agg(rhs) rhs
+      FROM tbl_pers_near
+    ),
+    bar AS
+    (
+      SELECT pnt2grp(lhs, rhs) pnt2grp
+      FROM foo
+    )
+    SELECT (pnt2grp).fireid,  (pnt2grp).lhs, (pnt2grp).rhs, (pnt2grp).ndetect
+    FROM bar
+  );
 
   n := (SELECT count(*) FROM tbl_pers_togrp);
   raise notice 'pers: togrp %', n;
 
   -- make list of nearby fires with count of repeated obs
-  DROP TABLE IF EXISTS tbl_pers_grpcnt;
-  CREATE TEMPORARY TABLE tbl_pers_grpcnt AS
-  with foo AS (
-    SELECT fireid,lhs,ndetect FROM tbl_pers_togrp
-    UNION ALL 
-    SELECT fireid,rhs,ndetect FROM tbl_pers_togrp
-  )
-  SELECT DISTINCT fireid grpid, lhs fireid, ndetect FROM foo;
+  TRUNCATE tbl_pers_grpcnt;
+  INSERT INTO tbl_pers_grpcnt ( 
+    with foo AS ( 
+      SELECT fireid,lhs,ndetect FROM tbl_pers_togrp 
+      UNION ALL 
+      SELECT fireid,rhs,ndetect FROM tbl_pers_togrp
+    ) 
+    SELECT DISTINCT fireid grpid, lhs fireid, ndetect FROM foo
+  );
 
   n := (SELECT count(*) FROM tbl_pers_grpcnt);
   raise notice 'pers: grpcnt %', n;
@@ -191,6 +231,12 @@ DO language plpgsql $$
       ndetect integer
     );
 
+    DROP TABLE IF EXISTS tbl_dupdet;
+    CREATE TEMPORARY TABLE tbl_dupdet (
+      LIKE work_lrg
+    );
+    PERFORM prep_find_persistence('work_lrg');
+
 
 
     FOR r IN SELECT * FROM tbl_ext LOOP 
@@ -204,8 +250,8 @@ DO language plpgsql $$
         THEN 
 
       -- create scratch table
-      DROP TABLE IF EXISTS tbl_dupdet;
-      CREATE TEMPORARY TABLE tbl_dupdet AS
+      TRUNCATE TABLE tbl_dupdet;
+      INSERT INTO tbl_dupdet
       ( 
         SELECT * FROM work_lrg 
         WHERE 
