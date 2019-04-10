@@ -28,7 +28,9 @@ create or replace function pnt2grp(lhs integer[], rhs integer[])
 returns setof p2grp as
 $$
     """given edges, return connected components"""
+    plpy.notice("pnt2pgp")
     import time, datetime
+    plpy.notice("pnt2pgp called, %s" % ( datetime.datetime.now()))
     t0 = time.time()
     import networkx as nx
     g = nx.Graph()
@@ -61,30 +63,30 @@ language plpython3u volatile;
 -- ON work_div
 -- USING GIST(geom);
 -- 
-do language plpgsql $$ begin
-raise notice 'tool: tbl_near , %', clock_timestamp();
-end $$;
--- near table
-DROP TABLE IF EXISTS tbl_near0;
-
-CREATE TABLE tbl_near0 AS 
-WITH foo AS ( 
-  SELECT
-  a.polyid AS aid,
-  a.geom AS ageom,
-  b.polyid AS bid,
-  b.geom AS bgeom
-  FROM work_div_newbraunfels AS a
-  INNER JOIN work_div_newbraunfels AS b
---  FROM work_div AS a
---  INNER JOIN work_div AS b
-  ON a.geom && b.geom
-  AND ST_Overlaps(a.geom, b.geom)
-  and a.polyid < b.polyid
-) 
-SELECT aid AS lhs, bid AS rhs 
-FROM foo
-;
+-- do language plpgsql $$ begin
+-- raise notice 'tool: tbl_near , %', clock_timestamp();
+-- end $$;
+-- -- near table
+-- DROP TABLE IF EXISTS tbl_near0;
+-- 
+-- CREATE TABLE tbl_near0 AS 
+-- WITH foo AS ( 
+--   SELECT
+--   a.polyid AS aid,
+--   a.geom AS ageom,
+--   b.polyid AS bid,
+--   b.geom AS bgeom
+--   FROM work_div_newbraunfels AS a
+--   INNER JOIN work_div_newbraunfels AS b
+-- --  FROM work_div AS a
+-- --  INNER JOIN work_div AS b
+--   ON a.geom && b.geom
+--   AND ST_Overlaps(a.geom, b.geom)
+--   and a.polyid < b.polyid
+-- ) 
+-- SELECT aid AS lhs, bid AS rhs 
+-- FROM foo
+-- ;
 -- 
 -- CREATE UNIQUE INDEX idx_near_pair ON tbl_near(lhs, rhs);
 
@@ -92,22 +94,31 @@ do language plpgsql $$ begin
 raise notice 'tool: tbl_togrp , %', clock_timestamp();
 end $$;
 
-DROP TABLE IF EXISTS tbl_togrp0;
+-- DROP TABLE IF EXISTS tbl_togrp;
+-- 
+-- -- This chokes memory on large problem
+-- CREATE TABLE tbl_togrp AS
+-- WITH foo AS
+-- (
+--   SELECT array_agg(lhs) lhs, array_agg(rhs) rhs
+--   FROM tbl_near
+-- ),
+-- bar AS
+-- (
+--   SELECT pnt2grp(lhs, rhs) pnt2grp
+--   FROM foo
+-- )
+-- SELECT (pnt2grp).fireid polyid,  (pnt2grp).lhs, (pnt2grp).rhs, (pnt2grp).ndetect
+-- FROM bar;
 
--- This chokes memory on large problem
-CREATE TABLE tbl_togrp0 AS
-WITH foo AS
-(
-  SELECT array_agg(lhs) lhs, array_agg(rhs) rhs
-  FROM tbl_near0
-),
-bar AS
-(
-  SELECT pnt2grp(lhs, rhs) pnt2grp
-  FROM foo
+drop table if exists tbl_grpcnt0;
+create table tbl_grpcnt0 as
+with foo as
+(select polyid,lhs,ndetect from tbl_togrp0
+  union all
+select polyid,rhs,ndetect from tbl_togrp0
 )
-SELECT (pnt2grp).fireid polyid,  (pnt2grp).lhs, (pnt2grp).rhs, (pnt2grp).ndetect
-FROM bar;
+select distinct polyid,lhs,ndetect from foo;
 
 -- -- This is very slow?
 -- https://stackoverflow.com/questions/45212799/how-to-identify-groups-clusters-in-set-of-arcs-edges-in-sql?noredirect=1&lq=1
