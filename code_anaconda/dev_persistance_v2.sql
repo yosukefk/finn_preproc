@@ -36,7 +36,8 @@ SET search_path TO scratch, public;
 DROP TABLE IF EXISTS tbl_ext0;
 CREATE TABLE tbl_ext0 AS
 WITH foo AS ( 
-  SELECT min(floor(ST_Xmin(geom_lrg))) xmn, min(ceil(ST_Ymin(geom_lrg))) ymn, max(floor(ST_XMax(geom_lrg))) xmx, max(ceil(ST_YMax(geom_lrg))) ymx, 10 dx, 10 dy
+  --SELECT min(floor(ST_Xmin(geom_lrg))) xmn, min(ceil(ST_Ymin(geom_lrg))) ymn, max(floor(ST_XMax(geom_lrg))) xmx, max(ceil(ST_YMax(geom_lrg))) ymx, 10 dx, 10 dy
+  SELECT min(floor(ST_Xmin(geom_lrg))) xmn, min(ceil(ST_Ymin(geom_lrg))) ymn, max(floor(ST_XMax(geom_lrg))) xmx, max(ceil(ST_YMax(geom_lrg))) ymx, 2 dx, 2 dy
   FROM work_lrg
 )
 SELECT xmn, xmx, ymn, ymx, dx, dy, ceil((xmx-xmn)/dx) nx, ceil((ymx-ymn)/dy) ny
@@ -79,6 +80,93 @@ SELECT *,
     x0::text || ' '  ||  y0::text || '))')::geometry geom
 FROM baz;
 
+DROP TYPE IF EXISTS persistence CASCADE;
+CREATE TYPE persistence AS ( 
+  grpid integer,
+  fireid integer,
+  ndetect integer
+);
+CREATE OR REPLACE FUNCTION find_persistence(tbl regclass)
+RETURNS setof persistence 
+AS $$ 
+
+-- get table of work_lrg, find list of persistent detection (i.e. collocated detections across days)
+DECLARE
+  n integer;
+
+BEGIN
+
+  -- subset smaller fires
+  DROP TABLE IF EXISTS tbl_pers_in;
+  EXECUTE 'CREATE TEMPORARY TABLE tbl_pers_in AS (
+    SELECT * from ' || tbl || 
+    ' WHERE area_sqkm < 2 ' || 
+    ');';
+  n := (SELECT count(*) FROM tbl_pers_in);
+  raise notice 'pers: in %', n;
+
+  -- create near table
+  DROP TABLE IF EXISTS tbl_pers_near;
+  CREATE TEMPORARY TABLE tbl_pers_near AS ( 
+    WITH foo AS ( 
+      SELECT 
+      a.fireid AS aid, 
+      a.geom_lrg AS ageom, 
+      b.fireid AS bid, 
+      b.geom_lrg AS bgeom 
+      FROM tbl_pers_in AS a 
+      INNER JOIN tbl_pers_in AS b 
+      ON a.geom_lrg && b.geom_lrg
+      AND ST_Overlaps(a.geom_lrg, b.geom_lrg) 
+      and a.fireid < b.fireid
+    ) 
+    SELECT aid AS lhs, bid AS rhs 
+    FROM foo) 
+  ;
+  CREATE UNIQUE INDEX idx_pers_near ON tbl_pers_near(lhs, rhs);
+  n := (SELECT count(*) FROM tbl_pers_near);
+  raise notice 'pers: near %', n;
+
+  -- identify connected components
+  DROP TABLE IF EXISTS tbl_pers_togrp;
+  CREATE TEMPORARY TABLE tbl_pers_togrp AS
+  WITH foo AS
+  (
+    SELECT array_agg(lhs) lhs, array_agg(rhs) rhs
+    FROM tbl_pers_near
+  ),
+  bar AS
+  (
+    SELECT pnt2grp(lhs, rhs) pnt2grp
+    FROM foo
+  )
+  SELECT (pnt2grp).fireid,  (pnt2grp).lhs, (pnt2grp).rhs, (pnt2grp).ndetect
+  FROM bar;
+
+  n := (SELECT count(*) FROM tbl_pers_togrp);
+  raise notice 'pers: togrp %', n;
+
+  -- make list of nearby fires with count of repeated obs
+  DROP TABLE IF EXISTS tbl_pers_grpcnt;
+  CREATE TEMPORARY TABLE tbl_pers_grpcnt AS
+  with foo AS (
+    SELECT fireid,lhs,ndetect FROM tbl_pers_togrp
+    UNION ALL 
+    SELECT fireid,rhs,ndetect FROM tbl_pers_togrp
+  )
+  SELECT DISTINCT fireid grpid, lhs fireid, ndetect FROM foo;
+
+  n := (SELECT count(*) FROM tbl_pers_grpcnt);
+  raise notice 'pers: grpcnt %', n;
+
+  RETURN QUERY SELECT grpid, fireid, ndetect FROM tbl_pers_grpcnt;
+
+
+  RETURN;
+
+END
+$$ LANGUAGE plpgsql;
+
 
 
 DO language plpgsql $$
@@ -89,25 +177,64 @@ DO language plpgsql $$
 --    nx INTEGER;
 --    ny INTEGER;
         n INTEGER;
+        p persistence[];
   BEGIN
 
-    FOR r IN SELECT * FROM tbl_ext LOOP
-      --raise notice '% % %', r.idx, r.jdx,  ST_AsText(r.geom);
-
-      drop table if exists tbl_dupdet;
-      create table tbl_dupdet as
-      (
-
-
-
-      SELECT * from work_lrg 
-      where 
-      work_lrg.area_sqkm < 3.0 
-      and work_lrg.geom_lrg && r.geom
-      and st_intersects(work_lrg.geom_lrg, r.geom)
+    DROP TABLE IF EXISTS tbl_persistent;
+    CREATE TABLE tbl_persistent (
+      grpid  integer,
+      fireid integer,
+      ndetect integer
     );
-    n:= (select count(*) from tbl_dupdet);
+
+
+
+    FOR r IN SELECT * FROM tbl_ext LOOP 
+      --raise notice '% % %', r.idx, r.jdx,  ST_AsText(r.geom); 
+
+      --IF r.idx = 4 AND r.jdx = 2 THEN -- Texas?
+      --IF r.idx = 4 AND r.jdx = 0 THEN -- only 1000 points
+      IF r.x0 < -98.1 AND r.x1 > -98.1 AND r.y0 < 29.7 AND r.y1 > 29.7 THEN -- New Braunfels
+
+      -- create scratch table
+      DROP TABLE IF EXISTS tbl_dupdet;
+      CREATE TEMPORARY TABLE tbl_dupdet AS
+      ( 
+        SELECT * FROM work_lrg 
+        WHERE 
+        work_lrg.geom_lrg && r.geom 
+        AND st_intersects(work_lrg.geom_lrg, r.geom)
+      ); 
+      
+      n:= (select count(*) from tbl_dupdet);
       raise notice '% % % %', r.idx, r.jdx, n, ST_AsText(r.geom);
+
+
+--      p := find_persistence('tbl_dupdet');
+--      
+--      INSERT INTO tbl_persistent(grpid, fireid, ndetect)
+--      SELECT x.grpid, x.fireid, x.ndetect
+--      FROM unnest(p) x;
+
+--       drop table if exists xxx;
+--       create table xxx (x persistence);
+--       WITH foo AS (
+--         SELECT find_persistence('tbl_dupdet') x
+--       )
+--       INSERT INTO xxx
+--       SELECT * from foo;
+
+      WITH foo AS (
+        SELECT find_persistence('tbl_dupdet') x
+      )
+      INSERT INTO tbl_persistent
+      SELECT (x).grpid, (x).fireid, (x).ndetect 
+      FROM foo;
+
+
+
+      END IF;
+
 
 --
     END LOOP;
@@ -123,146 +250,5 @@ $$ ;
 
 
 
--- go over each tile, come up with overlapping detections
-
--- screen to find fireid's to drop
-
-
-
-
--- -- I am going to reuse this function defined in step1_prep
--- -- 
--- -- -----------------------------------------
--- -- -- Part 2.1: pnt2grp (points to group) --
--- -- -----------------------------------------
--- -- 
--- drop type if exists p2grp cascade;
--- create type p2grp as (
--- 	fireid integer,
--- 	lhs integer,
--- 	rhs integer,
--- 	ndetect integer
--- );
--- 
--- 
--- -- given edges, return id of connected components to which it belongs to
--- -- edges are defined as two integer vectors lhs (verctor of id of start points) and rhs (end points)
--- -- return value is setof p2grp, which has 
--- --   fireid (lowest id within the component, which can be think of as id of connected component)
--- --   lhs (input)
--- --   rhs (input)
--- --   ndetect (count of nodes within components
--- create or replace function pnt2grp(lhs integer[], rhs integer[])
--- returns setof p2grp as
--- $$
---     """given edges, return connected components"""
---     import time, datetime
---     t0 = time.time()
---     import networkx as nx
---     g = nx.Graph()
---     g.add_edges_from((l,r) for (l,r) in zip(lhs,rhs))
---     plpy.notice("g.size(): %d, %s" % (g.size(), datetime.datetime.now()))
---     #plpy.notice("g.order(): %d" % g.order())
---     
---     results = []
---     ccs = nx.connected_component_subgraphs(g)
--- 
---     for sg in ccs:
---         clean0 = min(sg.nodes())
---         n = sg.order()
---         for e in sg.edges():
---             e = e if e[0] < e[1] else (e[1],e[0])
---             results.append([clean0, e[0], e[1], n])
---     #plpy.notice("elapsed: %d", (time.time() - t0)) 
---     return results
---     
--- $$ 
--- language plpython3u volatile;
--- -- language plpythonu volatile;
--- 
--- 
--- do language plpgsql $$ begin
--- raise notice 'tool: create index, %', clock_timestamp();
--- end $$;
--- 
--- CREATE INDEX work_div_idx
--- ON work_div
--- USING GIST(geom);
--- 
--- do language plpgsql $$ begin
--- raise notice 'tool: tbl_near , %', clock_timestamp();
--- end $$;
--- -- near table
--- DROP TABLE IF EXISTS tbl_near0;
--- 
--- CREATE TABLE tbl_near0 AS 
--- WITH foo AS ( 
---   SELECT
---   a.polyid AS aid,
---   a.geom AS ageom,
---   b.polyid AS bid,
---   b.geom AS bgeom
---   FROM work_div_newbraunfels AS a
---   INNER JOIN work_div_newbraunfels AS b
--- --  FROM work_div AS a
--- --  INNER JOIN work_div AS b
---   ON a.geom && b.geom
---   AND ST_Overlaps(a.geom, b.geom)
---   and a.polyid < b.polyid
--- ) 
--- SELECT aid AS lhs, bid AS rhs 
--- FROM foo
--- ;
--- -- 
--- -- CREATE UNIQUE INDEX idx_near_pair ON tbl_near(lhs, rhs);
--- 
--- do language plpgsql $$ begin
--- raise notice 'tool: tbl_togrp , %', clock_timestamp();
--- end $$;
--- 
--- DROP TABLE IF EXISTS tbl_togrp0;
--- 
--- -- This chokes memory on large problem
--- CREATE TABLE tbl_togrp0 AS
--- WITH foo AS
--- (
---   SELECT array_agg(lhs) lhs, array_agg(rhs) rhs
---   FROM tbl_near0
--- ),
--- bar AS
--- (
---   SELECT pnt2grp(lhs, rhs) pnt2grp
---   FROM foo
--- )
--- SELECT (pnt2grp).fireid polyid,  (pnt2grp).lhs, (pnt2grp).rhs, (pnt2grp).ndetect
--- FROM bar;
--- 
--- -- -- This is very slow?
--- -- https://stackoverflow.com/questions/45212799/how-to-identify-groups-clusters-in-set-of-arcs-edges-in-sql?noredirect=1&lq=1
--- -- found here, looked good but
--- -- https://www.fusionbox.com/blog/detail/graph-algorithms-in-a-database-recursive-ctes-and-topological-sort-with-postgres/620/
--- -- seems to be a bad idea to do this with database.  better stick with networkx
--- -- CREATE TABLE tbl_togrp0 AS 
--- -- WITH RECURSIVE nodecluster (
--- --   lhs, rhs, cluster1) AS ( 
--- --   SELECT lhs, rhs, Rank() Over( ORDER BY lhs )
--- --   FROM tbl_near0 AS n1
--- --   WHERE NOT EXISTS (
--- --     SELECT lhs,rhs from tbl_near0 AS n2 
--- --     WHERE n1.lhs = n2.rhs )
--- --   UNION ALL
--- --   SELECT n1.lhs, n1.rhs, nodecluster.cluster1
--- --   FROM tbl_near0 n1, nodecluster
--- --   WHERE nodecluster.rhs = n1.lhs )
--- -- SELECT * FROM nodecluster
--- -- ORDER BY cluster1, lhs, rhs;
---        
--- 
--- 
--- 
--- 
--- do language plpgsql $$ begin
--- raise notice 'tool: done , %', clock_timestamp();
--- end $$;
 
 -- vim: et sw=2
