@@ -216,13 +216,17 @@ $$ LANGUAGE plpgsql;
 DO language plpgsql $$
   DECLARE
     r RECORD;
---    idx INTEGER := 0;
---    jdx INTEGER := 0;
---    nx INTEGER;
---    ny INTEGER;
         n INTEGER;
         p persistence[];
+
+	run boolean := FALSE;
   BEGIN
+
+    -- by-pass generation of tbl_persistent
+    IF NOT run THEN
+      RETURN;
+    END IF;
+      
 
     DROP TABLE IF EXISTS tbl_persistent;
     CREATE TABLE tbl_persistent (
@@ -246,8 +250,8 @@ DO language plpgsql $$
       --IF r.idx = 4 AND r.jdx = 0 THEN -- only 1000 points
 --      IF r.x0 < -98.1 AND r.x1 > -98.1 AND r.y0 < 29.7 AND r.y1 > 29.7 OR -- New Braunfels
 --        r.x0 < -99.3 AND r.x1 > -99.3 AND r.y0 < 28.3 AND r.y1 > 28.3 -- Artesia Wells
-        IF TRUE
-        THEN 
+      IF TRUE
+      THEN 
 
       -- create scratch table
       TRUNCATE TABLE tbl_dupdet;
@@ -281,6 +285,114 @@ DO language plpgsql $$
     END LOOP;
 END
 $$ ;
+
+DROP TABLE IF EXISTS tbl_pers_fire_across_grps ;
+CREATE TEMPORARY TABLE tbl_pers_fire_across_grps AS
+WITH foo AS (
+  SELECT DISTINCT grpid, fireid
+  FROM tbl_persistent
+), bar AS ( 
+  SELECT fireid, count(*)
+  FROM foo
+  GROUP BY fireid
+), baz AS (
+  SELECT * FROM bar 
+  WHERE count > 1
+), qux AS (
+  SELECT p.* 
+  FROM tbl_persistent p
+  INNER JOIN baz b
+  ON p.fireid = b.fireid
+  ORDER BY p.fireid, p.grpid
+)
+SELECT array_agg(grpid) arr_grpid, fireid 
+FROM qux 
+GROUP BY fireid
+;
+
+DROP TABLE IF EXISTS tbl_pers_map_grpid;
+CREATE TABLE tbl_pers_map_grpid AS
+WITH foo AS (
+  SELECT DISTINCT arr_grpid
+  FROM tbl_pers_fire_across_grps
+)
+SELECT unnest(arr_grpid) grpid_from, 
+arr_grpid[1] grpid_to
+FROM foo
+;
+
+
+DROP TABLE IF EXISTS tbl_persistent2;
+CREATE TEMPORARY TABLE tbl_persistent2 AS
+TABLE tbl_persistent;
+
+UPDATE tbl_persistent2 p
+SET grpid = m.grpid_to
+FROM tbl_pers_map_grpid m
+WHERE p.grpid = m.grpid_from;
+
+DROP TABLE IF EXISTS tbl_persistent3;
+CREATE TEMPORARY TABLE tbl_persistent3 AS 
+WITH foo AS (
+  SELECT DISTINCT grpid, fireid
+  FROM tbl_persistent2
+), bar AS (
+  SELECT grpid, count(*) ndetect
+  FROM foo
+  GROUP BY grpid
+)
+SELECT f.grpid, f.fireid, b.ndetect, 1.0 fac_rept, ST_Area(w.geom_lrg, TRUE)/1000./1000. a_fire, 0.0 a_fire_sum, 0.0 a_grp, w.geom_lrg geom
+FROM foo f
+INNER JOIN bar b
+ON f.grpid = b.grpid
+INNER JOIN work_lrg w
+ON f.fireid = w.fireid
+;
+
+
+DROP TABLE IF EXISTS tbl_pers_grparea;
+CREATE TABLE tbl_pers_grparea AS 
+WITH foo AS ( 
+  SELECT grpid, count(*) as ndetect, sum(a_fire) a_fire_sum, ST_Union(geom) geom
+  FROM tbl_persistent3
+  GROUP BY grpid
+), bar AS (
+  SELECT grpid, ndetect, ST_Area(geom, TRUE)/1000./1000. a_grp, a_fire_sum, geom geom_a, ST_Centroid(geom) geom_p
+  FROM foo
+)
+SELECT  grpid, ndetect, a_grp, a_fire_sum, (a_fire_sum / a_grp) fac_rept, geom_a, geom_p
+from bar
+;
+
+UPDATE tbl_persistent3 p
+SET a_grp = g.a_grp, 
+fac_rept = g.fac_rept,
+a_fire_sum = g.a_fire_sum
+FROM tbl_pers_grparea g
+WHERE p.grpid = g.grpid;
+
+
+DROP TABLE IF EXISTS tbl_persistent4;
+CREATE TABLE tbl_persistent4 AS 
+SELECT grpid, fireid, ndetect, fac_rept
+FROM tbl_persistent3;
+
+
+
+
+
+
+-- SELECT p.grpid, p.fireid
+-- FROM tbl_persistent p
+-- INNER JOIN fire_across_grps f
+-- ON p.fireid = f.fireid
+-- ;
+-- SELECT a.* 
+-- FROM tbl_persistent a
+-- INNER JOIN bar b
+-- ON a.fireid = b.fireid
+-- ORDER BY fireid;
+
 
 
 
