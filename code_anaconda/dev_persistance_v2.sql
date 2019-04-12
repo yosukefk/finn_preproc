@@ -360,9 +360,15 @@ WITH foo AS (
   SELECT grpid, ndetect, ST_Area(geom, TRUE)/1000./1000. a_grp, a_fire_sum, geom geom_a, ST_Centroid(geom) geom_p
   FROM foo
 )
-SELECT  grpid, ndetect, a_grp, a_fire_sum, (a_fire_sum / a_grp) fac_rept, geom_a, geom_p
-from bar
+SELECT  grpid, ndetect, a_grp, a_fire_sum, (a_fire_sum / a_grp) fac_rept, '' nam, '' knd, '' description, geom_a, geom_p 
+FROM bar
 ;
+ALTER TABLE tbl_pers_grparea ADD rowid serial PRIMARY KEY;
+
+-- if you edit the attribute manually, better make duplicates manually like below
+-- drop table if exists tbl_pers_grparea_dup;
+-- create table tbl_pers_grparea_dup as table tbl_pers_grparea ;
+-- alter table tbl_pers_grparea_dup add primary key (rowid);
 
 UPDATE tbl_persistent3 p
 SET a_grp = g.a_grp, 
@@ -376,6 +382,7 @@ DROP TABLE IF EXISTS tbl_persistent4;
 CREATE TABLE tbl_persistent4 AS 
 SELECT grpid, fireid, ndetect, fac_rept
 FROM tbl_persistent3;
+
 
 
 
